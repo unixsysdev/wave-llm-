@@ -1,0 +1,65 @@
+{
+  "baseline": {
+    "best_acc": 0.893,
+    "trainable_params": 1053700,
+    "history": [
+      {
+        "epoch": 1,
+        "train_loss": 0.45156392965465786,
+        "train_acc": 0.8544,
+        "test_loss": 0.3627010429352522,
+        "test_acc": 0.884
+      },
+      {
+        "epoch": 2,
+        "train_loss": 0.34688814985342326,
+        "train_acc": 0.8858,
+        "test_loss": 0.3499379466525279,
+        "test_acc": 0.893
+      },
+      {
+        "epoch": 3,
+        "train_loss": 0.29575259296409784,
+        "train_acc": 0.903,
+        "test_loss": 0.3653291657920927,
+        "test_acc": 0.877
+      }
+    ]
+  },
+  "wave_adapter": {
+    "best_acc": 0.88,
+    "trainable_params": 26247176,
+    "num_adapter_layers": 2,
+    "history": [
+      {
+        "epoch": 1,
+        "train_loss": 0.490273908597976,
+        "train_acc": 0.8442,
+        "test_loss": 0.483109463557601,
+        "test_acc": 0.853
+      },
+      {
+        "epoch": 2,
+        "train_loss": 0.3872185691978782,
+        "train_acc": 0.8926,
+        "test_loss": 0.47557376394420864,
+        "test_acc": 0.861
+      },
+      {
+        "epoch": 3,
+        "train_loss": 0.36235212900135666,
+        "train_acc": 0.9024,
+        "test_loss": 0.4631326432758942,
+        "test_acc": 0.88
+      }
+    ]
+  },
+  "config": {
+    "model": "Qwen/Qwen3-0.6B",
+    "epochs": 3,
+    "batch_size": 8,
+    "lr": 0.0001,
+    "train_samples": 5000,
+    "test_samples": 1000
+  }
+}

@@ -1,0 +1,129 @@
+{
+  "model": "Qwen/Qwen3-0.6B",
+  "embedding_shape": [
+    151936,
+    1024
+  ],
+  "token_pairs": [
+    {
+      "word1": "cat",
+      "word2": "dog",
+      "embedding_similarity": 0.3981744647026062,
+      "amplitude_similarity": 0.8194130659103394,
+      "phase_coherence": 0.31961745023727417
+    },
+    {
+      "word1": "happy",
+      "word2": "joyful",
+      "embedding_similarity": 0.43948638439178467,
+      "amplitude_similarity": 0.8378592133522034,
+      "phase_coherence": 0.3198954164981842
+    },
+    {
+      "word1": "run",
+      "word2": "walk",
+      "embedding_similarity": 0.18240699172019958,
+      "amplitude_similarity": 0.790371835231781,
+      "phase_coherence": 0.13398383557796478
+    },
+    {
+      "word1": "happy",
+      "word2": "sad",
+      "embedding_similarity": 0.3343862295150757,
+      "amplitude_similarity": 0.8167394995689392,
+      "phase_coherence": 0.27427947521209717
+    },
+    {
+      "word1": "hot",
+      "word2": "cold",
+      "embedding_similarity": 0.4554867446422577,
+      "amplitude_similarity": 0.8226162195205688,
+      "phase_coherence": 0.36483266949653625
+    },
+    {
+      "word1": "big",
+      "word2": "small",
+      "embedding_similarity": 0.3740141689777374,
+      "amplitude_similarity": 0.8097310066223145,
+      "phase_coherence": 0.296328067779541
+    },
+    {
+      "word1": "cat",
+      "word2": "cats",
+      "embedding_similarity": 0.6540501713752747,
+      "amplitude_similarity": 0.8721474409103394,
+      "phase_coherence": 0.5447491407394409
+    },
+    {
+      "word1": "run",
+      "word2": "running",
+      "embedding_similarity": 0.6222553849220276,
+      "amplitude_similarity": 0.8641514778137207,
+      "phase_coherence": 0.5320972204208374
+    },
+    {
+      "word1": "happy",
+      "word2": "happily",
+      "embedding_similarity": 0.4767816364765167,
+      "amplitude_similarity": 0.8242076635360718,
+      "phase_coherence": 0.376654714345932
+    },
+    {
+      "word1": ".",
+      "word2": ",",
+      "embedding_similarity": 0.49390941858291626,
+      "amplitude_similarity": 0.8382964134216309,
+      "phase_coherence": 0.385427862405777
+    },
+    {
+      "word1": "!",
+      "word2": "?",
+      "embedding_similarity": 0.43344569206237793,
+      "amplitude_similarity": 0.8383704423904419,
+      "phase_coherence": 0.33990806341171265
+    },
+    {
+      "word1": "the",
+      "word2": "a",
+      "embedding_similarity": 0.4409544765949249,
+      "amplitude_similarity": 0.8215025663375854,
+      "phase_coherence": 0.37680312991142273
+    },
+    {
+      "word1": "1",
+      "word2": "2",
+      "embedding_similarity": 0.7251139879226685,
+      "amplitude_similarity": 0.8980821371078491,
+      "phase_coherence": 0.592420756816864
+    },
+    {
+      "word1": "0",
+      "word2": "9",
+      "embedding_similarity": 0.5279525518417358,
+      "amplitude_similarity": 0.8257246017456055,
+      "phase_coherence": 0.4739413261413574
+    }
+  ],
+  "top_frequencies": [
+    492,
+    319,
+    402,
+    181,
+    93,
+    484,
+    383,
+    389,
+    341,
+    285,
+    154,
+    325,
+    100,
+    263,
+    336,
+    91,
+    415,
+    436,
+    78,
+    378
+  ]
+}

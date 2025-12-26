@@ -247,6 +247,217 @@ Hybrid: FFT for global, attention for local.
 
 ---
 
+## New Experiments to Try (from recent discussion)
+
+### Experiment A: No MLP
+
+**Question**: Is the MLP even necessary when using FFT mixing?
+
+For modular arithmetic, the Fourier solution is:
+- Embed a, b as phases
+- Multiply phases (add in frequency domain)
+- Read off result
+
+If FFT mixing already does frequency decomposition, the MLP might just be a simple readout.
+
+```python
+class WaveTransformerNoMLP(nn.Module):
+    def forward(self, a, b):
+        x = embed(tokens) + pos_embed
+        x = x + wave_mix(x)  # FFT mixing only
+        # NO MLP - skip entirely
+        return unembed(x[:, 2, :])  # direct readout
+```
+
+**If this groks** → MLP is unnecessary for frequency-based tasks, wave mixing does everything
+**If this fails** → MLP is doing essential computation even with FFT mixing
+
+**Prediction**: For modular arithmetic, no MLP might work. For language, probably still needed.
+
+---
+
+### Experiment B: Wave Network Style (Token2Wave)
+
+**From**: [Wave Network paper](https://arxiv.org/abs/2411.02674)
+
+Different from our current approach. They explicitly construct:
+- **Magnitude** = Global semantics (L2 norm across all tokens per dimension)
+- **Phase** = Local semantics (each token's relationship to global)
+
+```python
+def token2wave(embeddings):
+    # embeddings: (batch, seq, hidden)
+    
+    # Global magnitude: energy across all tokens per dimension
+    G = torch.sqrt((embeddings ** 2).sum(dim=1))  # (batch, hidden)
+    
+    # Phase: each token's relation to global
+    # α_j,k = arctan2(sqrt(1 - (w_j,k/G_k)²), w_j,k/G_k)
+    ratio = embeddings / G.unsqueeze(1)  # (batch, seq, hidden)
+    phase = torch.atan2(torch.sqrt(1 - ratio**2), ratio)
+    
+    # Complex representation
+    Z = G.unsqueeze(1) * torch.exp(1j * phase)  # (batch, seq, hidden)
+    
+    return Z
+
+def wave_interference(Z):
+    # Mix via addition (wave interference)
+    return Z.sum(dim=1)  # (batch, hidden)
+
+def wave_modulation(Z):
+    # Mix via multiplication (wave modulation)
+    return Z.prod(dim=1)  # (batch, hidden)
+```
+
+**Key differences from our approach:**
+
+| Aspect | Our wave_full | Wave Network |
+|--------|---------------|--------------|
+| Magnitude | From FFT of Q/K | Explicit global sum |
+| Phase | From FFT of Q/K | Token→global relationship |
+| Mixing | Pairwise scores O(n²) | Add/multiply vectors O(n) |
+| Interpretability | Indirect | Direct: "how does token relate to whole" |
+
+**Results from their paper**:
+- Single-layer Wave Network: 91.66% on AG News
+- Beats single Transformer layer by ~20%
+- 77% less memory, 85% less training time vs BERT
+
+**Worth testing**: Implement Token2Wave + interference/modulation in our grokking setup.
+
+---
+
+### Experiment C: Remove Residual Connection
+
+**Question**: Can wave layers BE the information path, not just add to it?
+
+Currently:
+```python
+x = x + wave_mix(x)  # residual - wave only needs to ADD value
+```
+
+More aggressive:
+```python
+x = wave_mix(x)  # no residual - wave must CARRY all information
+```
+
+Or with learnable interpolation:
+```python
+x = self.residual_weight * x + (1 - self.residual_weight) * wave_mix(x)
+# Anneal residual_weight from 1→0 during training
+```
+
+**This tests**: Can wave ops be the *only* path? True layer replacement, not just augmentation.
+
+---
+
+### Experiment D: Stacking Wave Layers
+
+**Question**: What does depth do for wave networks?
+
+Multiple layers with different learned phase shifts:
+```python
+class DeepWaveNet(nn.Module):
+    def __init__(self, n_layers):
+        self.layers = nn.ModuleList([
+            WaveLayer(learned_gate=True, learned_phase=True)
+            for _ in range(n_layers)
+        ])
+    
+    def forward(self, x):
+        for layer in self.layers:
+            x = x + layer(x)
+        return x
+```
+
+**Hypothesis**: Each layer could learn different frequency relationships:
+- Layer 1: Local patterns (high frequency)
+- Layer 2: Phrase structure (medium frequency)
+- Layer 3: Global semantics (low frequency)
+
+Phase accumulates: total rotation = sum of all layer phase shifts.
+
+Like wavelets but learned end-to-end.
+
+---
+
+### Experiment E: Hybrid Architectures
+
+**Question**: What's the optimal mix of attention and FFT?
+
+Options:
+1. **Alternating**: attention, FFT, attention, FFT...
+2. **FFT early, attention late**: cheap mixing first, expensive precision later
+3. **Attention early, FFT late**: learn local patterns, then global mixing
+4. **Frequency-split**: FFT for low frequencies (global), attention for high (local)
+
+```python
+class HybridLayer(nn.Module):
+    def forward(self, x):
+        x_fft = fft(x, dim=seq)
+        
+        # Split by frequency
+        low = x_fft[:, :n_low, :]   # FFT mixing (cheap)
+        high = x_fft[:, n_low:, :]  # attention (precise)
+        
+        low_out = self.fft_mix(low)
+        high_out = self.attention(ifft(high))
+        
+        return ifft(concat(low_out, fft(high_out)))
+```
+
+---
+
+### Experiment F: Interpretability Analysis
+
+After training wave models, extract and visualize:
+
+1. **Learned frequency gates**: Which frequencies matter for which task?
+2. **Phase shifts per layer**: What rotations did each layer learn?
+3. **Frequency usage over training**: Do some frequencies "turn on" at grokking?
+4. **Per-class frequency signatures**: Different frequency patterns for different outputs?
+
+```python
+def analyze_wave_model(model):
+    for i, layer in enumerate(model.layers):
+        if hasattr(layer, 'freq_gate'):
+            plt.plot(layer.freq_gate.detach().cpu())
+            plt.title(f'Layer {i} frequency importance')
+        
+        if hasattr(layer, 'phase_shift'):
+            plt.plot(layer.phase_shift.detach().cpu())
+            plt.title(f'Layer {i} phase shifts')
+```
+
+**Goal**: See if frequency patterns correspond to something meaningful (like modular arithmetic structure in grokking).
+
+---
+
+### Experiment G: Different Tasks
+
+Test wave networks on tasks with different structure:
+
+1. **Modular multiplication** (not just addition) - different Fourier structure
+2. **Permutation tasks** - is FFT good for non-periodic structure?
+3. **Hierarchical tasks** - nested parentheses, syntax trees
+4. **Copying/reversal** - pure position manipulation
+
+**Hypothesis**: FFT excels at periodic/compositional tasks, may struggle with hierarchical/recursive structure.
+
+---
+
+## Summary: Priority Order
+
+1. ✅ **Done**: Basic grokking comparison (attention vs wave modes)
+2. **Next**: No-MLP experiment (is MLP needed with FFT?)
+3. **Next**: Wave Network style (Token2Wave + interference)
+4. **Then**: Remove residual / deep wave stacking
+5. **Then**: Interpretability analysis on trained models
+6. **Later**: Hybrid architectures, different tasks, language modeling
+
+---
+
 ## References
 
 - **FNet**: https://arxiv.org/abs/2105.03824 (FFT replaces attention, 7x faster)

@@ -1,0 +1,484 @@
+"""
+Distill Qwen3 attention into wave layers.
+
+Architecture:
+- Teacher: Full Qwen3-0.6B (frozen)
+- Student: Qwen3 embeddings + wave layers + Qwen3 MLPs + Qwen3 LM head
+
+We keep the MLPs (the "reasoning" part) and replace attention (the "routing" part).
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+import json
+from pathlib import Path
+from datetime import datetime
+import argparse
+
+from wave_layers import get_wave_layer
+
+
+class WaveQwen(nn.Module):
+    """
+    Qwen3 with attention replaced by wave layers.
+    
+    Keeps: embeddings, MLPs, RMSNorm, LM head
+    Replaces: attention layers with wave layers
+    """
+    
+    def __init__(
+        self,
+        base_model_name: str = "Qwen/Qwen3-0.6B",
+        wave_layer_type: str = "learned_gate",
+        freeze_mlps: bool = True,
+        freeze_embeds: bool = True,
+        max_seq_len: int = 512,
+    ):
+        super().__init__()
+        
+        # Load base model
+        print(f"Loading base model: {base_model_name}")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_name,
+            torch_dtype=torch.float32,
+        )
+        
+        config = base_model.config
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.num_layers = config.num_hidden_layers
+        self.vocab_size = config.vocab_size
+        
+        # Keep embeddings
+        self.embed_tokens = base_model.model.embed_tokens
+        if freeze_embeds:
+            for param in self.embed_tokens.parameters():
+                param.requires_grad = False
+        
+        # Build layers: wave attention + original MLP
+        self.layers = nn.ModuleList()
+        
+        for i in range(self.num_layers):
+            layer_dict = nn.ModuleDict()
+            
+            # Wave layer (replaces attention)
+            layer_dict['wave'] = get_wave_layer(
+                wave_layer_type,
+                self.hidden_size,
+                max_seq_len=max_seq_len,
+            )
+            
+            # Original MLP (keep from base model)
+            layer_dict['mlp'] = base_model.model.layers[i].mlp
+            if freeze_mlps:
+                for param in layer_dict['mlp'].parameters():
+                    param.requires_grad = False
+            
+            # Original norms
+            layer_dict['input_layernorm'] = base_model.model.layers[i].input_layernorm
+            layer_dict['post_attention_layernorm'] = base_model.model.layers[i].post_attention_layernorm
+            
+            self.layers.append(layer_dict)
+        
+        # Final norm and LM head
+        self.norm = base_model.model.norm
+        self.lm_head = base_model.lm_head
+        
+        if freeze_embeds:
+            for param in self.norm.parameters():
+                param.requires_grad = False
+            for param in self.lm_head.parameters():
+                param.requires_grad = False
+        
+        # Clean up base model
+        del base_model
+        torch.cuda.empty_cache()
+        
+        print(f"WaveQwen initialized with {wave_layer_type} layers")
+        print(f"Trainable params: {sum(p.numel() for p in self.parameters() if p.requires_grad):,}")
+        print(f"Total params: {sum(p.numel() for p in self.parameters()):,}")
+    
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor = None,
+        labels: torch.Tensor = None,
+    ):
+        # Embed
+        hidden_states = self.embed_tokens(input_ids)
+        
+        # Process through layers
+        for layer in self.layers:
+            # Wave attention (replaces self-attention)
+            # Note: wave layers have their own residual + norm
+            hidden_states = layer['wave'](
+                layer['input_layernorm'](hidden_states),
+                attention_mask=attention_mask,
+            )
+            
+            # MLP
+            residual = hidden_states
+            hidden_states = layer['post_attention_layernorm'](hidden_states)
+            hidden_states = layer['mlp'](hidden_states)
+            hidden_states = residual + hidden_states
+        
+        # Final norm + LM head
+        hidden_states = self.norm(hidden_states)
+        logits = self.lm_head(hidden_states)
+        
+        loss = None
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss = F.cross_entropy(
+                shift_logits.view(-1, self.vocab_size),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
+        
+        return {"logits": logits, "loss": loss}
+
+
+class TextDataset(Dataset):
+    """Simple dataset for distillation."""
+    
+    def __init__(self, texts, tokenizer, max_length=512):
+        self.encodings = tokenizer(
+            texts,
+            truncation=True,
+            padding="max_length",
+            max_length=max_length,
+            return_tensors="pt",
+        )
+    
+    def __len__(self):
+        return len(self.encodings.input_ids)
+    
+    def __getitem__(self, idx):
+        return {
+            "input_ids": self.encodings.input_ids[idx],
+            "attention_mask": self.encodings.attention_mask[idx],
+        }
+
+
+def load_sample_data(n_samples=1000):
+    """Load sample text data for distillation."""
+    
+    # Try to load wikitext or use simple synthetic data
+    try:
+        from datasets import load_dataset
+        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        texts = [t for t in dataset["text"] if len(t) > 100][:n_samples]
+        print(f"Loaded {len(texts)} samples from wikitext")
+        return texts
+    except:
+        print("Couldn't load wikitext, using synthetic data")
+        # Synthetic: repeat some sentences
+        base_texts = [
+            "The quick brown fox jumps over the lazy dog.",
+            "Machine learning is transforming how we build software.",
+            "Artificial intelligence systems can now understand natural language.",
+            "The transformer architecture has revolutionized NLP.",
+            "Deep learning models require large amounts of data.",
+        ]
+        return base_texts * (n_samples // len(base_texts))
+
+
+def distill(
+    teacher_model_name: str = "Qwen/Qwen3-0.6B",
+    wave_layer_type: str = "learned_gate",
+    n_samples: int = 1000,
+    batch_size: int = 4,
+    n_epochs: int = 3,
+    lr: float = 1e-4,
+    max_seq_len: int = 256,
+    temperature: float = 2.0,
+    alpha: float = 0.5,  # balance between soft and hard targets
+    output_dir: str = "results",
+    device: str = None,
+):
+    """
+    Distill teacher attention into student wave layers.
+    
+    Args:
+        teacher_model_name: Teacher model (full Qwen3)
+        wave_layer_type: Type of wave layer for student
+        n_samples: Number of training samples
+        batch_size: Batch size
+        n_epochs: Number of epochs
+        lr: Learning rate
+        max_seq_len: Maximum sequence length
+        temperature: Distillation temperature
+        alpha: Weight for soft targets (1-alpha for hard targets)
+        output_dir: Where to save results
+        device: Device to use
+    """
+    
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    print(f"Device: {device}")
+    print(f"Wave layer type: {wave_layer_type}")
+    print("=" * 60)
+    
+    # Create output directory
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Load tokenizer
+    print("Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(teacher_model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Load teacher (frozen)
+    print("Loading teacher model...")
+    teacher = AutoModelForCausalLM.from_pretrained(
+        teacher_model_name,
+        torch_dtype=torch.float32,
+    ).to(device)
+    teacher.eval()
+    for param in teacher.parameters():
+        param.requires_grad = False
+    
+    # Create student
+    print("Creating student model...")
+    student = WaveQwen(
+        base_model_name=teacher_model_name,
+        wave_layer_type=wave_layer_type,
+        freeze_mlps=True,
+        freeze_embeds=True,
+        max_seq_len=max_seq_len,
+    ).to(device)
+    
+    # Load data
+    print("Loading data...")
+    texts = load_sample_data(n_samples)
+    dataset = TextDataset(texts, tokenizer, max_length=max_seq_len)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    
+    # Optimizer (only wave layer params)
+    trainable_params = [p for p in student.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=lr)
+    
+    print(f"\nTraining...")
+    print(f"Samples: {len(dataset)}, Batches: {len(dataloader)}")
+    print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
+    
+    history = {
+        "epoch": [],
+        "loss": [],
+        "kl_loss": [],
+        "ce_loss": [],
+    }
+    
+    for epoch in range(n_epochs):
+        student.train()
+        total_loss = 0
+        total_kl = 0
+        total_ce = 0
+        
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{n_epochs}")
+        
+        for batch in pbar:
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            
+            # Teacher forward (frozen)
+            with torch.no_grad():
+                teacher_outputs = teacher(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+                teacher_logits = teacher_outputs.logits
+            
+            # Student forward
+            student_outputs = student(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            student_logits = student_outputs["logits"]
+            
+            # Distillation loss (KL divergence on soft targets)
+            soft_teacher = F.log_softmax(teacher_logits / temperature, dim=-1)
+            soft_student = F.log_softmax(student_logits / temperature, dim=-1)
+            kl_loss = F.kl_div(
+                soft_student,
+                soft_teacher.exp(),
+                reduction="batchmean",
+            ) * (temperature ** 2)
+            
+            # Hard target loss (standard cross-entropy on next token prediction)
+            shift_logits = student_logits[..., :-1, :].contiguous()
+            shift_labels = input_ids[..., 1:].contiguous()
+            ce_loss = F.cross_entropy(
+                shift_logits.view(-1, student.vocab_size),
+                shift_labels.view(-1),
+                ignore_index=tokenizer.pad_token_id,
+            )
+            
+            # Combined loss
+            loss = alpha * kl_loss + (1 - alpha) * ce_loss
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            total_kl += kl_loss.item()
+            total_ce += ce_loss.item()
+            
+            pbar.set_postfix({
+                "loss": f"{loss.item():.4f}",
+                "kl": f"{kl_loss.item():.4f}",
+                "ce": f"{ce_loss.item():.4f}",
+            })
+        
+        avg_loss = total_loss / len(dataloader)
+        avg_kl = total_kl / len(dataloader)
+        avg_ce = total_ce / len(dataloader)
+        
+        history["epoch"].append(epoch)
+        history["loss"].append(avg_loss)
+        history["kl_loss"].append(avg_kl)
+        history["ce_loss"].append(avg_ce)
+        
+        print(f"Epoch {epoch+1}: loss={avg_loss:.4f}, kl={avg_kl:.4f}, ce={avg_ce:.4f}")
+    
+    # Evaluate
+    print("\nEvaluating...")
+    student.eval()
+    teacher.eval()
+    
+    eval_results = evaluate_models(teacher, student, tokenizer, device, max_seq_len)
+    
+    # Save results
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results = {
+        "config": {
+            "teacher": teacher_model_name,
+            "wave_layer_type": wave_layer_type,
+            "n_samples": n_samples,
+            "n_epochs": n_epochs,
+            "lr": lr,
+            "temperature": temperature,
+            "alpha": alpha,
+        },
+        "history": history,
+        "eval": eval_results,
+    }
+    
+    results_file = output_path / f"distill_{wave_layer_type}_{timestamp}.json"
+    with open(results_file, "w") as f:
+        json.dump(results, f, indent=2)
+    
+    # Save student model
+    model_file = output_path / f"wave_qwen_{wave_layer_type}_{timestamp}.pt"
+    torch.save(student.state_dict(), model_file)
+    
+    print(f"\nResults saved to: {results_file}")
+    print(f"Model saved to: {model_file}")
+    
+    return results
+
+
+def evaluate_models(teacher, student, tokenizer, device, max_seq_len):
+    """Compare teacher and student on sample prompts."""
+    
+    prompts = [
+        "The capital of France is",
+        "Machine learning is a field of",
+        "The quick brown fox",
+        "In the year 2024,",
+        "Python is a programming language that",
+    ]
+    
+    results = []
+    
+    for prompt in prompts:
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_seq_len,
+        ).to(device)
+        
+        with torch.no_grad():
+            # Teacher generation
+            teacher_out = teacher.generate(
+                **inputs,
+                max_new_tokens=20,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+            teacher_text = tokenizer.decode(teacher_out[0], skip_special_tokens=True)
+            
+            # Student logits (can't use generate easily, just check logits)
+            student_out = student(**inputs)
+            student_logits = student_out["logits"]
+            
+            # Compare next token predictions
+            teacher_logits = teacher(**inputs).logits
+            
+            # Top-5 agreement
+            teacher_top5 = teacher_logits[0, -1].topk(5).indices
+            student_top5 = student_logits[0, -1].topk(5).indices
+            
+            agreement = len(set(teacher_top5.tolist()) & set(student_top5.tolist())) / 5
+            
+            results.append({
+                "prompt": prompt,
+                "teacher_text": teacher_text,
+                "top5_agreement": agreement,
+            })
+    
+    # Average agreement
+    avg_agreement = sum(r["top5_agreement"] for r in results) / len(results)
+    
+    print(f"\nTop-5 Token Agreement: {avg_agreement:.2%}")
+    print("\nSample outputs:")
+    for r in results[:3]:
+        print(f"  Prompt: {r['prompt']}")
+        print(f"  Teacher: {r['teacher_text']}")
+        print(f"  Agreement: {r['top5_agreement']:.2%}")
+        print()
+    
+    return {
+        "avg_top5_agreement": avg_agreement,
+        "samples": results,
+    }
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--teacher", type=str, default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--wave_type", type=str, default="learned_gate",
+                        choices=["learned_gate", "fnet", "wave_network", "frequency_band"])
+    parser.add_argument("--n_samples", type=int, default=1000)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--n_epochs", type=int, default=3)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--max_seq_len", type=int, default=256)
+    parser.add_argument("--temperature", type=float, default=2.0)
+    parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--output_dir", type=str, default="results")
+    
+    args = parser.parse_args()
+    
+    distill(
+        teacher_model_name=args.teacher,
+        wave_layer_type=args.wave_type,
+        n_samples=args.n_samples,
+        batch_size=args.batch_size,
+        n_epochs=args.n_epochs,
+        lr=args.lr,
+        max_seq_len=args.max_seq_len,
+        temperature=args.temperature,
+        alpha=args.alpha,
+        output_dir=args.output_dir,
+    )

@@ -1,6 +1,35 @@
 # Wave-LLM: Fourier-Based Attention for Transformers
 
-**Goal**: Replace standard attention layers entirely with wave/FFT-based attention that carries equivalent information but provides better interpretability and potentially faster computation.
+**Goal**: Replace standard attention layers entirely with wave/FFT-based attention that carries equivalent information but provides better interpretability and faster computation.
+
+## 🔥 Key Results: FFT Beats Attention on Grokking
+
+We tested standard attention vs FFT-based mixing on modular arithmetic (the grokking task). **FFT dramatically outperforms attention:**
+
+### Results (p=53, train_frac=0.3, 30k epochs)
+
+| Model | Test Acc | Grok Epoch | Speed | Params |
+|-------|----------|------------|-------|--------|
+| Standard Attention | **2.2%** | ❌ NEVER | 92 it/s | 211k |
+| Wave (fnet) | **99.4%** | 27,400 | 240 it/s | 146k |
+| Wave (learned_gate) | **99.8%** | **2,600** | 233 it/s | 146k |
+| Wave (phase_shift) | **93.4%** | ~28,000 | 233 it/s | 146k |
+| Wave (full) | **100%** | 23,300 | 94 it/s | 211k |
+
+### Key Findings
+
+1. **Standard attention FAILED to grok** - stuck at 2.2% (random chance)
+2. **learned_gate groks 10x faster** than any other method (epoch 2,600 vs 23,000+)
+3. **FFT is 2.5x faster** - 240 it/s vs 92 it/s
+4. **Fewer params, better results** - 146k params beats 211k params
+
+### Why FFT Wins
+
+Modular arithmetic naturally lives in Fourier space. Standard attention must *discover* this structure through training. FFT has it **baked into the architecture** - the inductive bias is perfect for the task.
+
+This suggests: **for tasks with periodic/compositional structure, FFT-based mixing may be fundamentally better than learned attention.**
+
+---
 
 ## Motivation
 
@@ -10,23 +39,54 @@ Standard attention computes similarity via dot products - opaque and O(n²). FFT
 - **Fast** - O(n log n) vs O(n²)
 - **Structured** - natural basis for compositional semantics
 
-The hypothesis: if we can show FFT-based attention works as well as standard attention, we gain interpretability and speed for free.
+## Experiment Details
 
-## Current Status: Proof of Concept
+### Grokking Comparison (experiments/)
 
-### Experiment Results (AG News Classification)
+We built identical 1-layer transformers, varying only the mixing mechanism:
 
-| Model | Test Accuracy | Trainable Params | Notes |
-|-------|---------------|------------------|-------|
-| Baseline (Frozen Qwen3 + Classifier) | **89.30%** | 1.05M | Simple pooling + MLP |
-| Wave Adapter (Frozen Qwen3 + 2 Wave Layers) | **88.00%** | 26.2M | Still improving at epoch 3 |
+**Standard Attention:**
+```python
+scores = Q @ K.T / sqrt(d)
+output = softmax(scores) @ V
+```
 
-**Interpretation**: Wave attention achieves ~98% of baseline performance. Not a clear win yet, but:
-- Wave was still improving (85.3% → 86.1% → 88.0%)
-- AG News is simple topic classification - may not need compositional structure
-- Current setup uses residual connections, so wave layers only need to *add* value, not *carry* all information
+**Wave (fnet):** Pure FFT, no learned params in mixing
+```python
+output = fft(fft(x, dim=seq), dim=hidden).real
+```
 
-### Key Findings: Embeddings Have Frequency Structure
+**Wave (learned_gate):** FFT + learnable frequency amplification
+```python
+x_fft = rfft(x, dim=seq)
+x_fft = x_fft * self.freq_gate  # learned: which frequencies matter
+output = irfft(x_fft)
+```
+
+**Wave (phase_shift):** FFT + learnable phase rotations
+```python
+x_fft = rfft(x, dim=seq)
+x_fft = x_fft * exp(1j * self.phase_shift)  # learned: phase rotations
+output = irfft(x_fft)
+```
+
+**Wave (full):** Q/K/V projections + phase-alignment scoring
+```python
+q_fft, k_fft = fft(Q), fft(K)
+scores = cos(angle(q_fft) - angle(k_fft)) * amplitude
+output = softmax(scores) @ V
+```
+
+### AG News Classification (train_wave_adapter.py)
+
+| Model | Test Accuracy | Trainable Params |
+|-------|---------------|------------------|
+| Baseline (Frozen Qwen3 + Classifier) | **89.30%** | 1.05M |
+| Wave Adapter (Frozen Qwen3 + 2 Wave Layers) | **88.00%** | 26.2M |
+
+Wave adapter achieves ~98% of baseline on simple classification. The real wins are on tasks requiring compositional structure (like modular arithmetic).
+
+### Embedding Analysis (visualize_waves.py)
 
 From analysis of Qwen3 embeddings:
 ```
@@ -36,7 +96,7 @@ Phase Coherence:      0.13-0.59, correlates with semantic similarity
 
 **Insight**: Amplitude is shared basis, **phase carries semantics**!
 
-### Phase Attention Clusters Semantically
+### Phase Attention Clustering (phase_attention_experiment.py)
 
 ```
 Within-group / Between-group attention ratio:
@@ -45,90 +105,65 @@ Within-group / Between-group attention ratio:
   Amp-Weighted Phase:     ~1.86 (best clustering!)
 ```
 
-## Future Directions
-
-### 1. Full Layer Replacement (Primary Goal)
-Replace actual Qwen attention layers with wave equivalent:
-- Remove residual dependency - wave layer must carry ALL information
-- Match param count exactly for fair comparison
-- Train from scratch on larger tasks
-
-### 2. Interpretability Extraction
-Once trained, extract meaning from wave layers:
-- Which frequencies does each layer amplify/suppress?
-- What do phase shifts correspond to semantically?
-- Can we see "reasoning steps" as phase rotations?
-
-Like our grokking experiments where Fourier components directly corresponded to modular arithmetic structure, we want to find similar correspondences in language.
-
-### 3. Speed Benchmarks
-Compare against standard attention:
-- FNet showed 7x speedup with ~92% BERT performance
-- Our approach keeps learned projections, so should be between FNet and full attention
-
-### 4. Harder Tasks
-AG News is too simple. Try:
-- Multi-hop reasoning (requires composition)
-- Semantic similarity (where phase coherence should shine)
-- Long-context tasks (where O(n log n) helps)
-
-## Architecture: Wave Attention Layer
-
-```python
-class WaveAttentionLayer:
-    """
-    Instead of: score = Q · K / √d
-    We compute: score = Σ cos(phase_Q - phase_K) * amplitude_weight
-    
-    Key insight: Phase alignment captures semantic similarity!
-    """
-    
-    def forward(self, x):
-        Q, K, V = project(x)
-        
-        # FFT to get amplitude and phase
-        Q_fft, K_fft = fft(Q), fft(K)
-        Q_amp, Q_phase = abs(Q_fft), angle(Q_fft)
-        K_amp, K_phase = abs(K_fft), angle(K_fft)
-        
-        # Amplitude-weighted phase alignment
-        amp_weights = sqrt(Q_amp * K_amp)
-        phase_alignment = cos(Q_phase - K_phase)
-        scores = sum(phase_alignment * amp_weights)
-        
-        # Standard attention from here
-        return softmax(scores) @ V
-```
+---
 
 ## Quick Start
 
 ```bash
-# Analyze embedding frequency structure
+# Run grokking comparison (the main result)
+cd experiments
+./run_comparison.sh
+
+# Run with visualizations (saves frames every 500 epochs)
+./run_visual.sh
+
+# Analyze Qwen3 embedding frequency structure
 ./run.sh
 
 # Compare attention mechanisms  
 ./run_phase_experiment.sh
-
-# Train wave adapter (main experiment)
-./run_training.sh
 ```
 
-## Files
+---
 
-| File | Description |
-|------|-------------|
-| `train_wave_adapter.py` | Main training script - wave vs baseline |
-| `visualize_waves.py` | FFT analysis of token embeddings |
-| `phase_attention_experiment.py` | Compare attention mechanisms |
-| `wave_utils.py` | Utility functions |
-| `results/` | Experiment outputs |
+## Future Directions
+
+See [DIRECTIONS.md](DIRECTIONS.md) for detailed roadmap.
+
+1. **Full Layer Replacement** - Replace actual transformer attention layers with FFT
+2. **Distillation** - Train FFT layers to mimic attention output
+3. **Interpretability** - Extract meaning from learned frequency weights
+4. **Harder NLP Tasks** - Test on reasoning, not just classification
+
+---
+
+## Project Structure
+
+```
+wave_token_analysis/
+├── experiments/           # Grokking comparison (main results)
+│   ├── models.py         # Standard + Wave transformers
+│   ├── train_comparison.py
+│   ├── train_visual.py   # With visualization snapshots
+│   └── results/          # JSON results + comparison plots
+├── train_wave_adapter.py  # AG News classification
+├── visualize_waves.py     # Embedding FFT analysis
+├── phase_attention_experiment.py
+├── DIRECTIONS.md          # Future work roadmap
+└── README.md
+```
+
+---
 
 ## References
 
-- Wave Network: https://arxiv.org/abs/2411.02674
-- FNet: https://arxiv.org/abs/2105.03824  
-- SIREN: https://arxiv.org/abs/2006.09661
+- **FNet**: https://arxiv.org/abs/2105.03824 (FFT replaces attention, 7x faster, 92% BERT)
+- **Wave Network**: https://arxiv.org/abs/2411.02674 (complex-valued tokens)
+- **SIREN**: https://arxiv.org/abs/2006.09661 (sinusoidal representations)
+- **Grokking**: https://arxiv.org/abs/2201.02177 (delayed generalization, Fourier emerges)
+
+---
 
 ## Related Work
 
-This builds on experiments with Fourier analysis of neural network internals, where we found that networks learning modular arithmetic develop clean Fourier representations that directly correspond to the mathematical structure. The hypothesis is that similar structure exists in language models and can be made explicit/interpretable via wave-based attention.
+This builds on our grokking/Fourier experiments where we found that networks learning modular arithmetic develop clean Fourier representations. The key insight: **FFT doesn't need to discover Fourier structure - it's built in.** This gives a massive advantage on tasks where Fourier is the natural basis.

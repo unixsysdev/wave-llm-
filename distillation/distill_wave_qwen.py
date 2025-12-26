@@ -165,27 +165,77 @@ class TextDataset(Dataset):
         }
 
 
-def load_sample_data(n_samples=1000):
-    """Load sample text data for distillation."""
+def load_sample_data(n_samples=1000, min_length=100):
+    """
+    Load diverse text data for distillation.
     
-    # Try to load wikitext or use simple synthetic data
-    try:
-        from datasets import load_dataset
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-        texts = [t for t in dataset["text"] if len(t) > 100][:n_samples]
-        print(f"Loaded {len(texts)} samples from wikitext")
-        return texts
-    except:
-        print("Couldn't load wikitext, using synthetic data")
-        # Synthetic: repeat some sentences
-        base_texts = [
-            "The quick brown fox jumps over the lazy dog.",
-            "Machine learning is transforming how we build software.",
-            "Artificial intelligence systems can now understand natural language.",
-            "The transformer architecture has revolutionized NLP.",
-            "Deep learning models require large amounts of data.",
-        ]
-        return base_texts * (n_samples // len(base_texts))
+    Tries datasets in order of preference:
+    1. SlimPajama (high quality, diverse)
+    2. C4 (large, web crawl)
+    3. OpenWebText
+    4. WikiText-2 (fallback, small)
+    """
+    from datasets import load_dataset
+    
+    datasets_to_try = [
+        ("cerebras/SlimPajama-627B", "train", "text"),
+        ("allenai/c4", "en", "text"),
+        ("openwebtext", "train", "text"),
+        ("wikitext", "wikitext-103-raw-v1", "text"),
+        ("wikitext", "wikitext-2-raw-v1", "text"),
+    ]
+    
+    for dataset_name, split_or_config, text_field in datasets_to_try:
+        try:
+            print(f"Trying to load {dataset_name}...")
+            
+            # Use streaming to avoid downloading entire dataset
+            if dataset_name == "allenai/c4":
+                dataset = load_dataset(dataset_name, split_or_config, split="train", streaming=True)
+            elif dataset_name == "cerebras/SlimPajama-627B":
+                dataset = load_dataset(dataset_name, split="train", streaming=True)
+            elif dataset_name == "openwebtext":
+                dataset = load_dataset(dataset_name, split=split_or_config, streaming=True)
+            else:
+                # WikiText - not streaming, it's small
+                dataset = load_dataset(dataset_name, split_or_config, split="train")
+                texts = [t for t in dataset[text_field] if len(t.strip()) > min_length][:n_samples]
+                print(f"Loaded {len(texts)} samples from {dataset_name}")
+                return texts
+            
+            # For streaming datasets, collect samples
+            texts = []
+            for sample in dataset:
+                text = sample[text_field]
+                if len(text.strip()) > min_length:
+                    texts.append(text)
+                if len(texts) >= n_samples:
+                    break
+            
+            if len(texts) >= n_samples // 2:  # Accept if we got at least half
+                print(f"Loaded {len(texts)} samples from {dataset_name}")
+                return texts
+            else:
+                print(f"Only got {len(texts)} samples from {dataset_name}, trying next...")
+                continue
+                
+        except Exception as e:
+            print(f"Couldn't load {dataset_name}: {e}")
+            continue
+    
+    # Final fallback: synthetic (should rarely happen)
+    print("WARNING: Using synthetic data - distillation quality will be poor!")
+    base_texts = [
+        "The quick brown fox jumps over the lazy dog. " * 10,
+        "Machine learning is transforming how we build software. " * 10,
+        "Artificial intelligence systems can now understand natural language. " * 10,
+        "The transformer architecture has revolutionized NLP. " * 10,
+        "Deep learning models require large amounts of data and compute. " * 10,
+        "Neural networks learn representations from examples. " * 10,
+        "Natural language processing enables computers to understand text. " * 10,
+        "Attention mechanisms allow models to focus on relevant parts. " * 10,
+    ]
+    return base_texts * (n_samples // len(base_texts) + 1)
 
 
 def distill(

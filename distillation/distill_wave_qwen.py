@@ -251,6 +251,7 @@ def distill(
     output_dir: str = "results",
     device: str = None,
     save_every_n_epochs: int = 1,  # Save checkpoint every N epochs
+    freeze_mlps: bool = True,  # Whether to freeze MLP layers
 ):
     """
     Distill teacher attention into student wave layers.
@@ -305,7 +306,7 @@ def distill(
     student = WaveQwen(
         base_model_name=teacher_model_name,
         wave_layer_type=wave_layer_type,
-        freeze_mlps=True,
+        freeze_mlps=freeze_mlps,
         freeze_embeds=True,
         max_seq_len=max_seq_len,
     ).to(device)
@@ -599,8 +600,13 @@ if __name__ == "__main__":
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--output_dir", type=str, default="results")
     parser.add_argument("--save_every", type=int, default=1, help="Save checkpoint every N epochs")
+    parser.add_argument("--freeze_mlps", type=bool, default=True, help="Freeze MLP layers (set False to train them)")
+    parser.add_argument("--unfreeze_mlps", action="store_true", help="Unfreeze MLP layers for training")
     
     args = parser.parse_args()
+    
+    # Handle both --freeze_mlps and --unfreeze_mlps flags
+    freeze_mlps = args.freeze_mlps and not args.unfreeze_mlps
     
     distill(
         teacher_model_name=args.teacher,
@@ -614,4 +620,5 @@ if __name__ == "__main__":
         alpha=args.alpha,
         output_dir=args.output_dir,
         save_every_n_epochs=args.save_every,
+        freeze_mlps=freeze_mlps,
     )

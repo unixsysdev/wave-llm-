@@ -252,6 +252,7 @@ def distill(
     device: str = None,
     save_every_n_epochs: int = 1,  # Save checkpoint every N epochs
     freeze_mlps: bool = True,  # Whether to freeze MLP layers
+    resume_from: str = None,  # Path to checkpoint to resume from
 ):
     """
     Distill teacher attention into student wave layers.
@@ -321,22 +322,34 @@ def distill(
     trainable_params = [p for p in student.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=lr)
     
-    print(f"\nTraining...")
-    print(f"Samples: {len(dataset)}, Batches: {len(dataloader)}")
-    print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
-    print(f"Checkpoints will be saved every {save_every_n_epochs} epoch(s)")
-    
+    # Resume from checkpoint if specified
+    start_epoch = 0
     history = {
         "epoch": [],
         "loss": [],
         "kl_loss": [],
         "ce_loss": [],
     }
-    
     best_loss = float('inf')
     best_epoch = 0
     
-    for epoch in range(n_epochs):
+    if resume_from is not None:
+        print(f"\nResuming from checkpoint: {resume_from}")
+        checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
+        student.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        start_epoch = checkpoint["epoch"]
+        history = checkpoint.get("history", history)
+        best_loss = checkpoint.get("loss", float('inf'))
+        best_epoch = start_epoch
+        print(f"Resuming from epoch {start_epoch}, loss={best_loss:.4f}")
+    
+    print(f"\nTraining...")
+    print(f"Samples: {len(dataset)}, Batches: {len(dataloader)}")
+    print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
+    print(f"Checkpoints will be saved every {save_every_n_epochs} epoch(s)")
+    
+    for epoch in range(start_epoch, n_epochs):
         student.train()
         total_loss = 0
         total_kl = 0
@@ -602,6 +615,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_every", type=int, default=1, help="Save checkpoint every N epochs")
     parser.add_argument("--freeze_mlps", type=bool, default=True, help="Freeze MLP layers (set False to train them)")
     parser.add_argument("--unfreeze_mlps", action="store_true", help="Unfreeze MLP layers for training")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     
     args = parser.parse_args()
     
@@ -621,4 +635,5 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         save_every_n_epochs=args.save_every,
         freeze_mlps=freeze_mlps,
+        resume_from=args.resume,
     )

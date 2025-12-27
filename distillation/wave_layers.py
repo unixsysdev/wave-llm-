@@ -16,6 +16,10 @@ class LearnedGateWaveLayer(nn.Module):
     
     O(n log n) complexity - much faster than attention.
     Learns which frequencies to amplify/suppress.
+    
+    NOTE: This layer does NOT include residual connection or layernorm.
+    The caller (e.g., WaveQwen) is responsible for residual + norm.
+    This matches the design in experiments/models.py that works.
     """
     
     def __init__(
@@ -34,8 +38,7 @@ class LearnedGateWaveLayer(nn.Module):
         self.freq_gate_real = nn.Parameter(torch.ones(n_freqs, hidden_size))
         self.freq_gate_imag = nn.Parameter(torch.zeros(n_freqs, hidden_size))
         
-        # Layer norm and dropout
-        self.layer_norm = nn.LayerNorm(hidden_size)
+        # Dropout only - no layernorm here
         self.dropout = nn.Dropout(dropout)
         
         # Optional projection (like attention output projection)
@@ -44,13 +47,12 @@ class LearnedGateWaveLayer(nn.Module):
     def forward(self, x: torch.Tensor, attention_mask=None) -> torch.Tensor:
         """
         Args:
-            x: (batch, seq_len, hidden_size)
-            attention_mask: (batch, seq_len) - optional, not really used for FFT
+            x: (batch, seq_len, hidden_size) - should be pre-normalized by caller
+            attention_mask: (batch, seq_len) - optional, not used for FFT
         Returns:
-            output: (batch, seq_len, hidden_size)
+            output: (batch, seq_len, hidden_size) - the wave mixing output (NO residual added)
         """
         batch, seq_len, hidden = x.shape
-        residual = x
         
         # FFT along sequence dimension
         x_fft = torch.fft.rfft(x, dim=1)  # (batch, n_freqs, hidden) complex
@@ -69,9 +71,7 @@ class LearnedGateWaveLayer(nn.Module):
         x = self.out_proj(x)
         x = self.dropout(x)
         
-        # Residual + LayerNorm
-        x = self.layer_norm(residual + x)
-        
+        # NO residual, NO layernorm - caller handles this
         return x
 
 
@@ -79,21 +79,19 @@ class FNetLayer(nn.Module):
     """
     Pure FNet - no learned parameters in mixing.
     Just FFT along sequence and hidden dims.
+    
+    NOTE: No internal residual/layernorm - caller handles this.
     """
     
     def __init__(self, hidden_size: int, dropout: float = 0.1):
         super().__init__()
-        self.layer_norm = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x: torch.Tensor, attention_mask=None) -> torch.Tensor:
-        residual = x
-        
         # 2D FFT: sequence then hidden
         x = torch.fft.fft2(x).real
         x = self.dropout(x)
-        
-        return self.layer_norm(residual + x)
+        return x  # NO residual, NO layernorm
 
 
 class WaveNetworkLayer(nn.Module):
@@ -102,6 +100,8 @@ class WaveNetworkLayer(nn.Module):
     
     Explicit magnitude (global) + phase (local→global relationship).
     O(n) complexity via interference/modulation.
+    
+    NOTE: No internal residual/layernorm - caller handles this.
     """
     
     def __init__(
@@ -120,7 +120,6 @@ class WaveNetworkLayer(nn.Module):
         
         # Output
         self.out_proj = nn.Linear(hidden_size, hidden_size)
-        self.layer_norm = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout)
     
     def token2wave(self, embeddings: torch.Tensor):
@@ -146,8 +145,6 @@ class WaveNetworkLayer(nn.Module):
         return Z, G
     
     def forward(self, x: torch.Tensor, attention_mask=None) -> torch.Tensor:
-        residual = x
-        
         # Create two variants via projection
         x1 = self.proj1(x)
         x2 = self.proj2(x)
@@ -169,7 +166,7 @@ class WaveNetworkLayer(nn.Module):
         x = self.out_proj(x)
         x = self.dropout(x)
         
-        return self.layer_norm(residual + x)
+        return x  # NO residual, NO layernorm
 
 
 class FrequencyBandLayer(nn.Module):
@@ -177,6 +174,8 @@ class FrequencyBandLayer(nn.Module):
     Hybrid: FFT for low frequencies (global), small attention for high frequencies (local).
     
     Balances O(n log n) efficiency with attention expressiveness.
+    
+    NOTE: No internal residual/layernorm - caller handles this.
     """
     
     def __init__(
@@ -201,12 +200,10 @@ class FrequencyBandLayer(nn.Module):
         self.v_proj = nn.Linear(hidden_size, hidden_size)
         
         self.out_proj = nn.Linear(hidden_size, hidden_size)
-        self.layer_norm = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x: torch.Tensor, attention_mask=None) -> torch.Tensor:
         batch, seq_len, hidden = x.shape
-        residual = x
         
         # FFT
         x_fft = torch.fft.rfft(x, dim=1)  # (batch, n_freqs, hidden)
@@ -250,7 +247,7 @@ class FrequencyBandLayer(nn.Module):
         x = self.out_proj(x)
         x = self.dropout(x)
         
-        return self.layer_norm(residual + x)
+        return x  # NO residual, NO layernorm
 
 
 def get_wave_layer(

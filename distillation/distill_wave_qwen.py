@@ -114,13 +114,13 @@ class WaveQwen(nn.Module):
         # Process through layers
         for layer in self.layers:
             # Wave attention (replaces self-attention)
-            # Note: wave layers have their own residual + norm
-            hidden_states = layer['wave'](
-                layer['input_layernorm'](hidden_states),
-                attention_mask=attention_mask,
-            )
+            # Proper residual: save original, normalize, apply wave, add back original
+            residual = hidden_states
+            hidden_states = layer['input_layernorm'](hidden_states)
+            hidden_states = layer['wave'](hidden_states, attention_mask=attention_mask)
+            hidden_states = residual + hidden_states  # Proper residual connection
             
-            # MLP
+            # MLP with residual
             residual = hidden_states
             hidden_states = layer['post_attention_layernorm'](hidden_states)
             hidden_states = layer['mlp'](hidden_states)

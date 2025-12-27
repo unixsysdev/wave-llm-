@@ -22,44 +22,53 @@ def load_wave_model(checkpoint_path: str, device: str = "cuda"):
     print(f"Loading checkpoint: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    # The checkpoint is just the state_dict directly (not wrapped in a dict)
-    # We need to infer config from the checkpoint filename or use defaults
-    import os
-    filename = os.path.basename(checkpoint_path)
-    
-    # Default config
-    base_model = "Qwen/Qwen3-0.6B"
-    wave_type = "learned_gate"
-    max_seq_len = 256  # Default used in training
-    
-    # Try to parse wave type from filename
-    if "learned_gate" in filename:
+    # Handle both old format (just state_dict) and new format (dict with model_state_dict)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        # New format with config
+        config = checkpoint.get("config", {})
+        base_model = config.get("teacher", "Qwen/Qwen3-0.6B")
+        wave_type = config.get("wave_layer_type", "learned_gate")
+        max_seq_len = config.get("max_seq_len", 256)
+        state_dict = checkpoint["model_state_dict"]
+        print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', '?')}")
+    else:
+        # Old format - state_dict directly
+        state_dict = checkpoint
+        import os
+        filename = os.path.basename(checkpoint_path)
+        
+        # Default config
+        base_model = "Qwen/Qwen3-0.6B"
         wave_type = "learned_gate"
-    elif "fnet" in filename:
-        wave_type = "fnet"
-    elif "wave_network" in filename:
-        wave_type = "wave_network"
-    elif "frequency_band" in filename:
-        wave_type = "frequency_band"
-    
-    # Also check if there's a matching JSON file with config
-    json_path = checkpoint_path.replace("wave_qwen_", "distill_").replace(".pt", ".json")
-    if os.path.exists(json_path):
-        import json
-        with open(json_path) as f:
-            config = json.load(f).get("config", {})
-            base_model = config.get("teacher", base_model)
-            wave_type = config.get("wave_layer_type", wave_type)
-            max_seq_len = config.get("max_seq_len", max_seq_len)
-    
-    # Infer max_seq_len from checkpoint if not in config
-    # freq_gate_real shape is [n_freqs, hidden_size] where n_freqs = max_seq_len // 2 + 1
-    for key, value in checkpoint.items():
-        if "freq_gate_real" in key:
-            n_freqs = value.shape[0]
-            max_seq_len = (n_freqs - 1) * 2
-            print(f"Inferred max_seq_len={max_seq_len} from checkpoint (n_freqs={n_freqs})")
-            break
+        max_seq_len = 256
+        
+        # Try to parse wave type from filename
+        if "learned_gate" in filename:
+            wave_type = "learned_gate"
+        elif "fnet" in filename:
+            wave_type = "fnet"
+        elif "wave_network" in filename:
+            wave_type = "wave_network"
+        elif "frequency_band" in filename:
+            wave_type = "frequency_band"
+        
+        # Also check if there's a matching JSON file with config
+        json_path = checkpoint_path.replace("wave_qwen_", "distill_").replace(".pt", ".json")
+        if os.path.exists(json_path):
+            import json
+            with open(json_path) as f:
+                config = json.load(f).get("config", {})
+                base_model = config.get("teacher", base_model)
+                wave_type = config.get("wave_layer_type", wave_type)
+                max_seq_len = config.get("max_seq_len", max_seq_len)
+        
+        # Infer max_seq_len from checkpoint if not in config
+        for key, value in state_dict.items():
+            if "freq_gate_real" in key:
+                n_freqs = value.shape[0]
+                max_seq_len = (n_freqs - 1) * 2
+                print(f"Inferred max_seq_len={max_seq_len} from checkpoint (n_freqs={n_freqs})")
+                break
     
     print(f"Base model: {base_model}")
     print(f"Wave type: {wave_type}")
@@ -74,8 +83,8 @@ def load_wave_model(checkpoint_path: str, device: str = "cuda"):
         max_seq_len=max_seq_len,
     )
     
-    # Load trained weights - checkpoint is the state_dict directly
-    model.load_state_dict(checkpoint)
+    # Load trained weights
+    model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
     

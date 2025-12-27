@@ -250,6 +250,7 @@ def distill(
     alpha: float = 0.5,  # balance between soft and hard targets
     output_dir: str = "results",
     device: str = None,
+    save_every_n_epochs: int = 1,  # Save checkpoint every N epochs
 ):
     """
     Distill teacher attention into student wave layers.
@@ -266,6 +267,7 @@ def distill(
         alpha: Weight for soft targets (1-alpha for hard targets)
         output_dir: Where to save results
         device: Device to use
+        save_every_n_epochs: Save checkpoint every N epochs
     """
     
     if device is None:
@@ -278,6 +280,9 @@ def distill(
     # Create output directory
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Generate timestamp for this run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Load tokenizer
     print("Loading tokenizer...")
@@ -318,6 +323,7 @@ def distill(
     print(f"\nTraining...")
     print(f"Samples: {len(dataset)}, Batches: {len(dataloader)}")
     print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
+    print(f"Checkpoints will be saved every {save_every_n_epochs} epoch(s)")
     
     history = {
         "epoch": [],
@@ -398,6 +404,27 @@ def distill(
         history["ce_loss"].append(avg_ce)
         
         print(f"Epoch {epoch+1}: loss={avg_loss:.4f}, kl={avg_kl:.4f}, ce={avg_ce:.4f}")
+        
+        # Save checkpoint every N epochs
+        if (epoch + 1) % save_every_n_epochs == 0:
+            checkpoint_file = output_path / f"wave_qwen_{wave_layer_type}_{timestamp}_epoch{epoch+1}.pt"
+            torch.save({
+                "epoch": epoch + 1,
+                "model_state_dict": student.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "history": history,
+                "config": {
+                    "teacher": teacher_model_name,
+                    "wave_layer_type": wave_layer_type,
+                    "n_samples": n_samples,
+                    "n_epochs": n_epochs,
+                    "lr": lr,
+                    "max_seq_len": max_seq_len,
+                    "temperature": temperature,
+                    "alpha": alpha,
+                },
+            }, checkpoint_file)
+            print(f"  💾 Checkpoint saved: {checkpoint_file}")
     
     # Evaluate
     print("\nEvaluating...")
@@ -406,8 +433,7 @@ def distill(
     
     eval_results = evaluate_models(teacher, student, tokenizer, device, max_seq_len)
     
-    # Save results
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Save final results
     results = {
         "config": {
             "teacher": teacher_model_name,
@@ -426,12 +452,27 @@ def distill(
     with open(results_file, "w") as f:
         json.dump(results, f, indent=2)
     
-    # Save student model
-    model_file = output_path / f"wave_qwen_{wave_layer_type}_{timestamp}.pt"
-    torch.save(student.state_dict(), model_file)
+    # Save final student model
+    model_file = output_path / f"wave_qwen_{wave_layer_type}_{timestamp}_final.pt"
+    torch.save({
+        "epoch": n_epochs,
+        "model_state_dict": student.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "history": history,
+        "config": {
+            "teacher": teacher_model_name,
+            "wave_layer_type": wave_layer_type,
+            "n_samples": n_samples,
+            "n_epochs": n_epochs,
+            "lr": lr,
+            "max_seq_len": max_seq_len,
+            "temperature": temperature,
+            "alpha": alpha,
+        },
+    }, model_file)
     
     print(f"\nResults saved to: {results_file}")
-    print(f"Model saved to: {model_file}")
+    print(f"Final model saved to: {model_file}")
     
     return results
 
@@ -517,6 +558,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--output_dir", type=str, default="results")
+    parser.add_argument("--save_every", type=int, default=1, help="Save checkpoint every N epochs")
     
     args = parser.parse_args()
     
@@ -531,4 +573,5 @@ if __name__ == "__main__":
         temperature=args.temperature,
         alpha=args.alpha,
         output_dir=args.output_dir,
+        save_every_n_epochs=args.save_every,
     )

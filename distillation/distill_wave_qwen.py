@@ -332,6 +332,9 @@ def distill(
         "ce_loss": [],
     }
     
+    best_loss = float('inf')
+    best_epoch = 0
+    
     for epoch in range(n_epochs):
         student.train()
         total_loss = 0
@@ -405,6 +408,12 @@ def distill(
         
         print(f"Epoch {epoch+1}: loss={avg_loss:.4f}, kl={avg_kl:.4f}, ce={avg_ce:.4f}")
         
+        # Track best model
+        is_best = avg_loss < best_loss
+        if is_best:
+            best_loss = avg_loss
+            best_epoch = epoch + 1
+        
         # Save checkpoint every N epochs
         if (epoch + 1) % save_every_n_epochs == 0:
             checkpoint_file = output_path / f"wave_qwen_{wave_layer_type}_{timestamp}_epoch{epoch+1}.pt"
@@ -412,6 +421,7 @@ def distill(
                 "epoch": epoch + 1,
                 "model_state_dict": student.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "loss": avg_loss,
                 "history": history,
                 "config": {
                     "teacher": teacher_model_name,
@@ -425,6 +435,28 @@ def distill(
                 },
             }, checkpoint_file)
             print(f"  💾 Checkpoint saved: {checkpoint_file}")
+            
+            # Save best model separately
+            if is_best:
+                best_file = output_path / f"wave_qwen_{wave_layer_type}_{timestamp}_best.pt"
+                torch.save({
+                    "epoch": epoch + 1,
+                    "model_state_dict": student.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "loss": avg_loss,
+                    "history": history,
+                    "config": {
+                        "teacher": teacher_model_name,
+                        "wave_layer_type": wave_layer_type,
+                        "n_samples": n_samples,
+                        "n_epochs": n_epochs,
+                        "lr": lr,
+                        "max_seq_len": max_seq_len,
+                        "temperature": temperature,
+                        "alpha": alpha,
+                    },
+                }, best_file)
+                print(f"  ⭐ New best model! (loss={avg_loss:.4f})")
     
     # Evaluate
     print("\nEvaluating...")
@@ -446,6 +478,8 @@ def distill(
         },
         "history": history,
         "eval": eval_results,
+        "best_epoch": best_epoch,
+        "best_loss": best_loss,
     }
     
     results_file = output_path / f"distill_{wave_layer_type}_{timestamp}.json"
@@ -458,6 +492,7 @@ def distill(
         "epoch": n_epochs,
         "model_state_dict": student.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "loss": avg_loss,
         "history": history,
         "config": {
             "teacher": teacher_model_name,
@@ -471,8 +506,13 @@ def distill(
         },
     }, model_file)
     
-    print(f"\nResults saved to: {results_file}")
-    print(f"Final model saved to: {model_file}")
+    print(f"\n" + "=" * 60)
+    print(f"Training complete!")
+    print(f"Best epoch: {best_epoch} (loss={best_loss:.4f})")
+    print(f"Results saved to: {results_file}")
+    print(f"Final model: {model_file}")
+    print(f"Best model: wave_qwen_{wave_layer_type}_{timestamp}_best.pt")
+    print("=" * 60)
     
     return results
 
